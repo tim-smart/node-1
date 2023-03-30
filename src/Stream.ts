@@ -1,9 +1,9 @@
+import type { LazyArg } from "@effect/data/Function"
+import { pipe } from "@effect/data/Function"
+import * as Option from "@effect/data/Option"
 import * as Effect from "@effect/io/Effect"
 import * as Sink from "@effect/stream/Sink"
 import * as Stream from "@effect/stream/Stream"
-import type { LazyArg } from "@fp-ts/core/Function"
-import { pipe } from "@fp-ts/core/Function"
-import * as Option from "@fp-ts/core/Option"
 import type { Readable, Writable } from "node:stream"
 
 export const DEFAULT_CHUNK_SIZE = 64 * 1024
@@ -78,15 +78,24 @@ export type WritableSink<A> = Sink.Sink<never, WritableError, A, never, void>
 
 export const sink = <A>(
   evaluate: LazyArg<Writable>,
-  { encoding = "binary", endOnExit = true }: SinkOptions = {}
-): WritableSink<A> =>
+  { encoding, endOnExit = true }: SinkOptions = {}
+): WritableSink<A> => endOnExit ? makeSinkWithRelease<A>(evaluate, encoding) : makeSink<A>(evaluate, encoding)
+
+const makeSink = <A>(stream: LazyArg<Writable>, encoding?: BufferEncoding) =>
   pipe(
-    Effect.acquireRelease(Effect.sync(evaluate), endOnExit ? end : () => Effect.unit()),
-    Effect.map((_) => makeSink<A>(_, encoding)),
+    Effect.sync(stream),
+    Effect.map((_) => Sink.forEach(write<A>(_, encoding))),
+    Sink.unwrap
+  )
+
+const makeSinkWithRelease = <A>(stream: LazyArg<Writable>, encoding?: BufferEncoding) =>
+  pipe(
+    Effect.acquireRelease(Effect.sync(stream), endWritable),
+    Effect.map((_) => Sink.forEach(write<A>(_, encoding))),
     Sink.unwrapScoped
   )
 
-const end = (stream: Writable) =>
+const endWritable = (stream: Writable) =>
   Effect.async<never, never, void>((resume) => {
     if (stream.closed) {
       resume(Effect.unit())
@@ -96,16 +105,20 @@ const end = (stream: Writable) =>
     stream.end(() => resume(Effect.unit()))
   })
 
-const makeSink = <A>(stream: Writable, encoding: BufferEncoding) => Sink.forEach(write<A>(stream, encoding))
-
-const write = <A>(stream: Writable, encoding: BufferEncoding) =>
+const write = <A>(stream: Writable, encoding?: BufferEncoding) =>
   (_: A) =>
     Effect.async<never, WritableError, void>((resume) => {
-      stream.write(_, encoding, (err) => {
+      const cb = (err?: Error | null) => {
         if (err) {
           resume(Effect.fail(new WritableError(err)))
         } else {
           resume(Effect.unit())
         }
-      })
+      }
+
+      if (encoding) {
+        stream.write(_, encoding, cb)
+      } else {
+        stream.write(_, cb)
+      }
     })
